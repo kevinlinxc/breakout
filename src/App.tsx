@@ -16,12 +16,13 @@ export default function App() {
   const [selectedDate, setSelectedDate] = useState<Date>(new Date());
   const [logs, setLogs] = useState<Record<string, DailyLog>>({});
   const [currentLog, setCurrentLog] = useState<DailyLog>(defaultLog);
-  const [countDrafts, setCountDrafts] = useState({ whiteheads: '', cystic_acne: '', water: '' });
+  const [countDrafts, setCountDrafts] = useState({ whiteheads: '0', cystic_acne: '0', water: '0' });
   const [isLoading, setIsLoading] = useState(false);
   const [isDirty, setIsDirty] = useState(false);
   const lastSavedRef = useRef<string>('');
   const forceSaveRef = useRef(false);
   const logsRef = useRef<Record<string, DailyLog>>({});
+  const selectedDateRef = useRef<Date>(new Date());
 
   // Calendar state
   const [currentMonth, setCurrentMonth] = useState(new Date());
@@ -35,6 +36,10 @@ export default function App() {
   }, [logs]);
 
   useEffect(() => {
+    selectedDateRef.current = selectedDate;
+  }, [selectedDate]);
+
+  useEffect(() => {
     const dateStr = format(selectedDate, 'yyyy-MM-dd');
     const existingLog = logsRef.current[dateStr];
 
@@ -42,15 +47,15 @@ export default function App() {
       const logForDate = normalizeLog(existingLog);
       setCurrentLog(logForDate);
       setCountDrafts({
-        whiteheads: logForDate.whiteheads > 0 ? String(logForDate.whiteheads) : '',
-        cystic_acne: logForDate.cystic_acne > 0 ? String(logForDate.cystic_acne) : '',
-        water: (logForDate.water ?? 0) > 0 ? String(logForDate.water) : '',
+        whiteheads: String(logForDate.whiteheads ?? 0),
+        cystic_acne: String(logForDate.cystic_acne ?? 0),
+        water: String(logForDate.water ?? 0),
       });
       lastSavedRef.current = JSON.stringify(logForDate);
     } else {
       const emptyLog = { ...defaultLog, date: dateStr };
       setCurrentLog(emptyLog);
-      setCountDrafts({ whiteheads: '', cystic_acne: '', water: '' });
+      setCountDrafts({ whiteheads: '0', cystic_acne: '0', water: '0' });
       lastSavedRef.current = JSON.stringify(emptyLog);
     }
     forceSaveRef.current = false;
@@ -108,7 +113,13 @@ export default function App() {
   };
 
   const saveLog = async (logToSave: DailyLog) => {
-    setSaveState('saving');
+    const savingDate = logToSave.date;
+    const currentDateAtStart = format(selectedDateRef.current, 'yyyy-MM-dd');
+    const isActiveAtStart = savingDate === currentDateAtStart;
+    if (isActiveAtStart) {
+      setSaveState('saving');
+    }
+
     try {
       const res = await fetch('/api/logs', {
         method: 'POST',
@@ -124,7 +135,19 @@ export default function App() {
       const savedLog = payload?.log ? normalizeLog(payload.log) : normalizeLog(logToSave);
       const localSnapshot = normalizeLog(logToSave);
       setLogs(prev => ({ ...prev, [savedLog.date]: savedLog }));
+
+      const currentDateAtFinish = format(selectedDateRef.current, 'yyyy-MM-dd');
+      const isActiveAtFinish = savingDate === currentDateAtFinish;
+      if (!isActiveAtFinish) {
+        return;
+      }
+
       setCurrentLog(localSnapshot);
+      setCountDrafts({
+        whiteheads: String(localSnapshot.whiteheads ?? 0),
+        cystic_acne: String(localSnapshot.cystic_acne ?? 0),
+        water: String(localSnapshot.water ?? 0),
+      });
       lastSavedRef.current = JSON.stringify(localSnapshot);
       forceSaveRef.current = false;
       setIsDirty(false);
@@ -132,6 +155,10 @@ export default function App() {
       setToast({ message: 'Saved successfully', type: 'success' });
     } catch (error) {
       console.error('Failed to save log', error);
+      const currentDateAtError = format(selectedDateRef.current, 'yyyy-MM-dd');
+      if (savingDate !== currentDateAtError) {
+        return;
+      }
       setSaveState('error');
       setToast({ message: 'Failed to save', type: 'error' });
     }
@@ -207,16 +234,17 @@ export default function App() {
 
   const handleCountDraftChange = (field: 'whiteheads' | 'cystic_acne' | 'water', rawValue: string) => {
     const sanitized = digitsOnly(rawValue);
+    const normalizedDraft = sanitized === '' ? '0' : String(parseInt(sanitized, 10));
     const currentDraft = countDrafts[field];
-    if (sanitized !== currentDraft) {
+    if (normalizedDraft !== currentDraft) {
       const currentNumericValue = field === 'water' ? (currentLog.water ?? 0) : currentLog[field];
-      const parsedValue = parseWholeNumber(sanitized);
+      const parsedValue = parseWholeNumber(normalizedDraft);
       if (parsedValue === currentNumericValue) {
         forceSaveRef.current = true;
         setIsDirty(true);
       }
     }
-    setCountDrafts(prev => ({ ...prev, [field]: sanitized }));
+    setCountDrafts(prev => ({ ...prev, [field]: normalizedDraft }));
   };
 
   const navigateToDate = (nextDate: Date) => {
@@ -462,9 +490,18 @@ export default function App() {
                     <CardTitle>
                       {format(selectedDate, 'EEEE, MMMM do')}
                     </CardTitle>
-                    {isToday(selectedDate) && (
-                      <span className="text-xs font-medium bg-stone-900 text-white px-2 py-1 rounded">Today</span>
-                    )}
+                    <div className="flex items-end flex-col gap-1">
+                      {isToday(selectedDate) && (
+                        <span className="text-xs font-medium bg-stone-900 text-white px-2 py-1 rounded">Today</span>
+                      )}
+                      <span className="text-xs text-stone-500">
+                        {saveState === 'pending' && 'Autosaving in a moment...'}
+                        {saveState === 'saving' && 'Saving...'}
+                        {saveState === 'saved' && 'Saved'}
+                        {saveState === 'error' && 'Save failed'}
+                        {(saveState === 'idle' || (!isDirty && saveState !== 'saved')) && 'Autosave is on'}
+                      </span>
+                    </div>
                   </div>
                 </CardHeader>
                 <CardContent className="p-0">
@@ -598,16 +635,6 @@ export default function App() {
                         value={currentLog.notes || ''}
                         onChange={(e) => handleInputChange('notes', e.target.value)}
                       />
-                    </div>
-
-                    <div className="p-5 bg-stone-50 flex justify-end">
-                      <div className="text-xs text-stone-500">
-                        {saveState === 'pending' && 'Autosaving in a moment...'}
-                        {saveState === 'saving' && 'Saving...'}
-                        {saveState === 'saved' && 'Saved'}
-                        {saveState === 'error' && 'Save failed'}
-                        {(saveState === 'idle' || (!isDirty && saveState !== 'saved')) && 'Autosave is on'}
-                      </div>
                     </div>
                   </form>
                 </CardContent>

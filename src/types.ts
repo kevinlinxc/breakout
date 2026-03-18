@@ -14,6 +14,7 @@ export interface DailyLog {
   pleasure?: boolean;
   whiteheads: number;
   cystic_acne: number;
+  acne_state: number;
   notes?: string;
   created_at?: string;
   updated_at?: string;
@@ -34,5 +35,6 @@ export const defaultLog: DailyLog = {
   pleasure: false,
   whiteheads: 0,
   cystic_acne: 0,
+  acne_state: 0,
   notes: ''
 };

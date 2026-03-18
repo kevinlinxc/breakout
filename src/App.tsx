@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { format, parseISO, startOfMonth, endOfMonth, eachDayOfInterval, isSameDay, isToday } from 'date-fns';
-import { ChevronLeft, ChevronRight, Download, Plus, List, Calendar as CalendarIcon } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Download, Plus, List, Calendar as CalendarIcon, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -9,6 +9,17 @@ import { DailyLog, defaultLog } from '@/types';
 import { cn } from '@/lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
 
+interface AppImportMetaEnv {
+  VITE_API_BASE_URL?: string;
+}
+
+interface AppImportMeta {
+  env: AppImportMetaEnv;
+}
+
+const API_BASE_URL = ((import.meta as AppImportMeta).env.VITE_API_BASE_URL || '').replace(/\/$/, '');
+const apiUrl = (path: string) => (API_BASE_URL ? `${API_BASE_URL}${path}` : path);
+
 export default function App() {
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
   const [saveState, setSaveState] = useState<'idle' | 'pending' | 'saving' | 'saved' | 'error'>('idle');
@@ -16,13 +27,15 @@ export default function App() {
   const [selectedDate, setSelectedDate] = useState<Date>(new Date());
   const [logs, setLogs] = useState<Record<string, DailyLog>>({});
   const [currentLog, setCurrentLog] = useState<DailyLog>(defaultLog);
-  const [countDrafts, setCountDrafts] = useState({ whiteheads: '0', cystic_acne: '0', water: '0' });
+  const [countDrafts, setCountDrafts] = useState({ whiteheads: '0', cystic_acne: '0', water: '0', acne_state: '0' });
   const [isLoading, setIsLoading] = useState(false);
   const [isDirty, setIsDirty] = useState(false);
   const lastSavedRef = useRef<string>('');
   const forceSaveRef = useRef(false);
   const logsRef = useRef<Record<string, DailyLog>>({});
   const selectedDateRef = useRef<Date>(new Date());
+  const saveSequenceRef = useRef(0);
+  const latestSaveTokenByDateRef = useRef<Record<string, number>>({});
 
   // Calendar state
   const [currentMonth, setCurrentMonth] = useState(new Date());
@@ -50,12 +63,13 @@ export default function App() {
         whiteheads: String(logForDate.whiteheads ?? 0),
         cystic_acne: String(logForDate.cystic_acne ?? 0),
         water: String(logForDate.water ?? 0),
+        acne_state: String(logForDate.acne_state ?? 0),
       });
       lastSavedRef.current = JSON.stringify(logForDate);
     } else {
       const emptyLog = { ...defaultLog, date: dateStr };
       setCurrentLog(emptyLog);
-      setCountDrafts({ whiteheads: '0', cystic_acne: '0', water: '0' });
+      setCountDrafts({ whiteheads: '0', cystic_acne: '0', water: '0', acne_state: '0' });
       lastSavedRef.current = JSON.stringify(emptyLog);
     }
     forceSaveRef.current = false;
@@ -87,6 +101,7 @@ export default function App() {
     stress: typeof log.stress === 'number' ? log.stress : parseInt(log.stress || '0', 10) || 0,
     whiteheads: typeof log.whiteheads === 'number' ? log.whiteheads : parseInt(log.whiteheads || '0', 10) || 0,
     cystic_acne: typeof log.cystic_acne === 'number' ? log.cystic_acne : parseInt(log.cystic_acne || '0', 10) || 0,
+    acne_state: typeof log.acne_state === 'number' ? log.acne_state : parseInt(log.acne_state || '0', 10) || 0,
     exercise: parseBool(log.exercise),
     sunlight: parseBool(log.sunlight),
     pleasure: parseBool(log.pleasure),
@@ -95,7 +110,7 @@ export default function App() {
   const fetchLogs = async () => {
     setIsLoading(true);
     try {
-      const res = await fetch('/api/logs');
+      const res = await fetch(apiUrl('/api/logs'));
       if (res.ok) {
         const data = await res.json();
         const logsMap: Record<string, DailyLog> = {};
@@ -104,6 +119,30 @@ export default function App() {
           logsMap[normalized.date] = normalized;
         });
         setLogs(logsMap);
+
+        if (!isDirty) {
+          const activeDate = format(selectedDateRef.current, 'yyyy-MM-dd');
+          const activeLog = logsMap[activeDate];
+          if (activeLog) {
+            const logForDate = normalizeLog(activeLog);
+            setCurrentLog(logForDate);
+            setCountDrafts({
+              whiteheads: String(logForDate.whiteheads ?? 0),
+              cystic_acne: String(logForDate.cystic_acne ?? 0),
+              water: String(logForDate.water ?? 0),
+              acne_state: String(logForDate.acne_state ?? 0),
+            });
+            lastSavedRef.current = JSON.stringify(logForDate);
+          } else {
+            const emptyLog = { ...defaultLog, date: activeDate };
+            setCurrentLog(emptyLog);
+            setCountDrafts({ whiteheads: '0', cystic_acne: '0', water: '0', acne_state: '0' });
+            lastSavedRef.current = JSON.stringify(emptyLog);
+          }
+          forceSaveRef.current = false;
+          setIsDirty(false);
+          setSaveState('idle');
+        }
       }
     } catch (error) {
       console.error('Failed to fetch logs', error);
@@ -114,6 +153,8 @@ export default function App() {
 
   const saveLog = async (logToSave: DailyLog) => {
     const savingDate = logToSave.date;
+    const saveToken = ++saveSequenceRef.current;
+    latestSaveTokenByDateRef.current[savingDate] = saveToken;
     const currentDateAtStart = format(selectedDateRef.current, 'yyyy-MM-dd');
     const isActiveAtStart = savingDate === currentDateAtStart;
     if (isActiveAtStart) {
@@ -121,7 +162,7 @@ export default function App() {
     }
 
     try {
-      const res = await fetch('/api/logs', {
+      const res = await fetch(apiUrl('/api/logs'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(logToSave),
@@ -132,6 +173,10 @@ export default function App() {
       }
 
       const payload = await res.json();
+      if (latestSaveTokenByDateRef.current[savingDate] !== saveToken) {
+        return;
+      }
+
       const savedLog = payload?.log ? normalizeLog(payload.log) : normalizeLog(logToSave);
       const localSnapshot = normalizeLog(logToSave);
       setLogs(prev => ({ ...prev, [savedLog.date]: savedLog }));
@@ -147,6 +192,7 @@ export default function App() {
         whiteheads: String(localSnapshot.whiteheads ?? 0),
         cystic_acne: String(localSnapshot.cystic_acne ?? 0),
         water: String(localSnapshot.water ?? 0),
+        acne_state: String(localSnapshot.acne_state ?? 0),
       });
       lastSavedRef.current = JSON.stringify(localSnapshot);
       forceSaveRef.current = false;
@@ -155,6 +201,10 @@ export default function App() {
       setToast({ message: 'Saved successfully', type: 'success' });
     } catch (error) {
       console.error('Failed to save log', error);
+      if (latestSaveTokenByDateRef.current[savingDate] !== saveToken) {
+        return;
+      }
+
       const currentDateAtError = format(selectedDateRef.current, 'yyyy-MM-dd');
       if (savingDate !== currentDateAtError) {
         return;
@@ -183,7 +233,7 @@ export default function App() {
   }, [currentLog, isDirty]);
 
   const handleExport = () => {
-    window.location.href = '/api/export';
+    window.location.href = apiUrl('/api/export');
   };
 
   const handleInputChange = (field: keyof DailyLog, value: string | number | boolean) => {
@@ -206,6 +256,7 @@ export default function App() {
     whiteheads: parseWholeNumber(countDrafts.whiteheads),
     cystic_acne: parseWholeNumber(countDrafts.cystic_acne),
     water: parseWholeNumber(countDrafts.water),
+    acne_state: parseWholeNumber(countDrafts.acne_state),
   });
 
   useEffect(() => {
@@ -218,7 +269,10 @@ export default function App() {
       const hasChanged =
         prev.whiteheads !== nextWhiteheads ||
         prev.cystic_acne !== nextCystic ||
-        prevWater !== nextWater;
+        prevWater !== nextWater ||
+        prev.acne_state !== parseWholeNumber(countDrafts.acne_state);
+
+      const nextAcneState = parseWholeNumber(countDrafts.acne_state);
 
       if (!hasChanged) return prev;
 
@@ -228,11 +282,12 @@ export default function App() {
         whiteheads: nextWhiteheads,
         cystic_acne: nextCystic,
         water: nextWater,
+        acne_state: nextAcneState,
       };
     });
-  }, [countDrafts.whiteheads, countDrafts.cystic_acne, countDrafts.water]);
+  }, [countDrafts.whiteheads, countDrafts.cystic_acne, countDrafts.water, countDrafts.acne_state]);
 
-  const handleCountDraftChange = (field: 'whiteheads' | 'cystic_acne' | 'water', rawValue: string) => {
+  const handleCountDraftChange = (field: 'whiteheads' | 'cystic_acne' | 'water' | 'acne_state', rawValue: string) => {
     const sanitized = digitsOnly(rawValue);
     const normalizedDraft = sanitized === '' ? '0' : String(parseInt(sanitized, 10));
     const currentDraft = countDrafts[field];
@@ -292,6 +347,15 @@ export default function App() {
               B
             </div>
             <h1 className="font-semibold text-lg tracking-tight hidden sm:block">Break Out</h1>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => void fetchLogs()}
+              disabled={isLoading}
+              aria-label="Refresh logs"
+            >
+              <RefreshCw className={cn("w-4 h-4", isLoading && "animate-spin")} />
+            </Button>
           </div>
           <div className="flex items-center gap-2">
             <Button
@@ -459,9 +523,11 @@ export default function App() {
               </Card>
               <Card className="bg-white">
                 <CardContent className="p-4 flex flex-col items-center justify-center text-center">
-                  <span className="text-xs font-medium text-stone-500 uppercase tracking-wider">Total Acne</span>
+                  <span className="text-xs font-medium text-stone-500 uppercase tracking-wider">Avg Acne State</span>
                   <span className="text-2xl font-semibold mt-1">
-                    {(Object.values(logs) as DailyLog[]).reduce((acc, log) => acc + (log.whiteheads || 0) + (log.cystic_acne || 0), 0)}
+                    {Object.values(logs).length > 0
+                      ? ((Object.values(logs) as DailyLog[]).reduce((acc, log) => acc + (log.acne_state ?? 0), 0) / Object.values(logs).length).toFixed(1)
+                      : '-'}
                   </span>
                 </CardContent>
               </Card>
@@ -531,6 +597,25 @@ export default function App() {
                             className="bg-white border-red-200 focus-visible:ring-red-500"
                           />
                         </div>
+                        <div className="space-y-1.5">
+                          <label className="text-sm font-medium text-stone-700">Sleep (hrs)</label>
+                          <Input
+                            placeholder="Sleep (hrs)"
+                            value={currentLog.sleep || ''}
+                            onChange={(e) => handleInputChange('sleep', e.target.value)}
+                            className="bg-white"
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <label className="text-sm font-medium text-stone-700">Acne State</label>
+                          <Input
+                            type="text"
+                            inputMode="numeric"
+                            value={countDrafts.acne_state}
+                            onChange={(e) => handleCountDraftChange('acne_state', e.target.value)}
+                            className="bg-white"
+                          />
+                        </div>
                       </div>
                     </div>
 
@@ -584,11 +669,6 @@ export default function App() {
                     <div className="p-5">
                       <h4 className="text-xs font-bold text-stone-500 uppercase tracking-wider mb-3">Lifestyle</h4>
                       <div className="grid grid-cols-2 gap-3">
-                        <Input
-                          placeholder="Sleep (hrs)"
-                          value={currentLog.sleep || ''}
-                          onChange={(e) => handleInputChange('sleep', e.target.value)}
-                        />
                         <div className="col-span-1 flex flex-col justify-center">
                           <label className="text-xs font-medium text-stone-500 mb-1">Stress: {currentLog.stress ?? 0}/10</label>
                           <input
@@ -600,6 +680,7 @@ export default function App() {
                             onChange={(e) => handleInputChange('stress', parseInt(e.target.value, 10) || 0)}
                           />
                         </div>
+                        <div className="col-span-1" />
                         <label className="col-span-2 flex items-center gap-2 text-sm text-stone-700">
                           <input
                             type="checkbox"

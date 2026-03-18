@@ -1,11 +1,13 @@
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import Database from 'better-sqlite3';
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const dbPath = path.join(__dirname, 'acne_tracker.db');
+const dbPath = path.join(__dirname, 'data', 'acne_tracker.db');
+fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 const db = new Database(dbPath);
 const LOCAL_USER_ID = 'local-user';
 
@@ -37,6 +39,7 @@ db.exec(`
     pleasure INTEGER DEFAULT 0,
     whiteheads INTEGER DEFAULT 0,
     cystic_acne INTEGER DEFAULT 0,
+    acne_state INTEGER DEFAULT 0,
     notes TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -67,6 +70,7 @@ try {
         pleasure INTEGER DEFAULT 0,
         whiteheads INTEGER DEFAULT 0,
         cystic_acne INTEGER DEFAULT 0,
+        acne_state INTEGER DEFAULT 0,
         notes TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -75,10 +79,10 @@ try {
       
       INSERT INTO daily_logs_new (
         date, user_id, breakfast, lunch, dinner, snacks, water, dairy,
-        exercise, sunlight, sleep, stress, pleasure, whiteheads, cystic_acne, notes, created_at, updated_at
+        exercise, sunlight, sleep, stress, pleasure, whiteheads, cystic_acne, acne_state, notes, created_at, updated_at
       ) SELECT 
         date, '${LOCAL_USER_ID}', breakfast, lunch, dinner, snacks, water, dairy,
-        exercise, 0, sleep, stress, pleasure, whiteheads, cystic_acne, notes, created_at, updated_at
+        exercise, 0, sleep, stress, pleasure, whiteheads, cystic_acne, 0, notes, created_at, updated_at
       FROM daily_logs;
 
       DROP TABLE daily_logs;
@@ -100,6 +104,17 @@ try {
   console.error('Sunlight migration failed:', error);
 }
 
+// Migration: add acne_state column for existing databases
+try {
+  const columns = db.prepare("PRAGMA table_info(daily_logs)").all() as any[];
+  if (!columns.find(c => c.name === 'acne_state')) {
+    console.log('Migrating database: adding acne_state to daily_logs');
+    db.exec('ALTER TABLE daily_logs ADD COLUMN acne_state INTEGER DEFAULT 0');
+  }
+} catch (error) {
+  console.error('Acne state migration failed:', error);
+}
+
 // Ensure any existing rows are scoped to the local user
 try {
   db.prepare("UPDATE daily_logs SET user_id = ? WHERE user_id IS NULL OR user_id = ''").run(LOCAL_USER_ID);
@@ -110,6 +125,7 @@ try {
 async function startServer() {
   const app = express();
   const PORT = 3000;
+  const allowedOrigin = process.env.ALLOWED_ORIGIN;
 
   const toBoolean = (value: unknown): boolean => {
     if (typeof value === 'boolean') return value;
@@ -125,6 +141,24 @@ async function startServer() {
   };
 
   app.use(express.json());
+  app.use((req, res, next) => {
+    const requestOrigin = req.headers.origin;
+    const allowAll = !allowedOrigin;
+    const allowThisOrigin = allowAll || requestOrigin === allowedOrigin;
+
+    if (allowThisOrigin && requestOrigin) {
+      res.header('Access-Control-Allow-Origin', requestOrigin);
+      res.header('Vary', 'Origin');
+    }
+    res.header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type');
+
+    if (req.method === 'OPTIONS') {
+      return res.sendStatus(204);
+    }
+
+    next();
+  });
 
   // API Routes
   app.get('/api/logs', (req, res) => {
@@ -160,10 +194,10 @@ async function startServer() {
       const stmt = db.prepare(`
         INSERT INTO daily_logs (
           date, user_id, breakfast, lunch, dinner, snacks, water, dairy,
-          exercise, sunlight, sleep, stress, pleasure, whiteheads, cystic_acne, notes, updated_at
+          exercise, sunlight, sleep, stress, pleasure, whiteheads, cystic_acne, acne_state, notes, updated_at
         ) VALUES (
           @date, @user_id, @breakfast, @lunch, @dinner, @snacks, @water, @dairy,
-          @exercise, @sunlight, @sleep, @stress, @pleasure, @whiteheads, @cystic_acne, @notes, CURRENT_TIMESTAMP
+          @exercise, @sunlight, @sleep, @stress, @pleasure, @whiteheads, @cystic_acne, @acne_state, @notes, CURRENT_TIMESTAMP
         ) ON CONFLICT(date, user_id) DO UPDATE SET
           breakfast = excluded.breakfast,
           lunch = excluded.lunch,
@@ -178,6 +212,7 @@ async function startServer() {
           pleasure = excluded.pleasure,
           whiteheads = excluded.whiteheads,
           cystic_acne = excluded.cystic_acne,
+            acne_state = excluded.acne_state,
           notes = excluded.notes,
           updated_at = CURRENT_TIMESTAMP
       `);
@@ -192,6 +227,7 @@ async function startServer() {
         pleasure: toBoolean(data.pleasure) ? 1 : 0,
         whiteheads: Number.isFinite(Number(data.whiteheads)) ? Number(data.whiteheads) : 0,
         cystic_acne: Number.isFinite(Number(data.cystic_acne)) ? Number(data.cystic_acne) : 0,
+        acne_state: Number.isFinite(Number(data.acne_state)) ? Number(data.acne_state) : 0,
       };
 
       stmt.run(safeData);
